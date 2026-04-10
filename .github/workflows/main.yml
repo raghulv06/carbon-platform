@@ -25,62 +25,52 @@ jobs:
           cd backend
           pytest test_main.py
 
-  build-and-push:
+  build-and-deploy:
     needs: test
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
     steps:
       - uses: actions/checkout@v3
-      - name: Login to Azure
-        uses: azure/login@v1
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-      - name: Login to ACR
-        run: az acr login -n ${{ secrets.ACR_NAME }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Build and Push Backend
         run: |
-          docker build -t ${{ secrets.ACR_NAME }}.azurecr.io/carbon-backend:${{ github.sha }} ./backend
-          docker push ${{ secrets.ACR_NAME }}.azurecr.io/carbon-backend:${{ github.sha }}
-          docker tag ${{ secrets.ACR_NAME }}.azurecr.io/carbon-backend:${{ github.sha }} ${{ secrets.ACR_NAME }}.azurecr.io/carbon-backend:latest
-          docker push ${{ secrets.ACR_NAME }}.azurecr.io/carbon-backend:latest
+          IMAGE_ID=ghcr.io/${{ github.repository }}/carbon-backend
+          IMAGE_ID=$(echo $IMAGE_ID | tr '[A-Z]' '[a-z]')
+          docker build -t $IMAGE_ID:latest ./backend
+          docker push $IMAGE_ID:latest
+
       - name: Build and Push Frontend
         run: |
-          docker build -t ${{ secrets.ACR_NAME }}.azurecr.io/carbon-frontend:${{ github.sha }} ./frontend
-          docker push ${{ secrets.ACR_NAME }}.azurecr.io/carbon-frontend:${{ github.sha }}
-          docker tag ${{ secrets.ACR_NAME }}.azurecr.io/carbon-frontend:${{ github.sha }} ${{ secrets.ACR_NAME }}.azurecr.io/carbon-frontend:latest
-          docker push ${{ secrets.ACR_NAME }}.azurecr.io/carbon-frontend:latest
+          IMAGE_ID=ghcr.io/${{ github.repository }}/carbon-frontend
+          IMAGE_ID=$(echo $IMAGE_ID | tr '[A-Z]' '[a-z]')
+          docker build -t $IMAGE_ID:latest ./frontend
+          docker push $IMAGE_ID:latest
 
-  deploy:
-    needs: build-and-push
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - name: Login to Azure
-        uses: azure/login@v1
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-      - name: Setup kubelogin
-        uses: azure/use-kubelogin@v1
-        with:
-          kubelogin-version: 'v0.0.24'
-      - name: Setup kubectl
-        uses: azure/setup-kubectl@v3
-      - name: Get AKS Credentials
+      - name: Setup Minikube for Kubernetes Deployment
+        uses: medyagh/setup-minikube@latest
+
+      - name: Substitute GHCR Image Names in Manifests
         run: |
-          az aks get-credentials --resource-group ${{ secrets.AZURE_RG }} --name ${{ secrets.AKS_NAME }} --overwrite-existing
-          kubelogin convert-kubeconfig -l azurecli
-      - name: Install dependencies
-        run: pip install kubernetes
-      - name: Substitute ACR Names
-        run: |
-          sed -i 's|myacr.azurecr.io|${{ secrets.ACR_NAME }}.azurecr.io|g' k8s/backend.yaml
-          sed -i 's|myacr.azurecr.io|${{ secrets.ACR_NAME }}.azurecr.io|g' k8s/frontend.yaml
+          IMAGE_ID_BACKEND=$(echo ghcr.io/${{ github.repository }}/carbon-backend:latest | tr '[A-Z]' '[a-z]')
+          IMAGE_ID_FRONTEND=$(echo ghcr.io/${{ github.repository }}/carbon-frontend:latest | tr '[A-Z]' '[a-z]')
+          sed -i "s|myacr.azurecr.io/carbon-backend:latest|$IMAGE_ID_BACKEND|g" k8s/backend.yaml
+          sed -i "s|myacr.azurecr.io/carbon-frontned:latest|$IMAGE_ID_FRONTEND|g" k8s/frontend.yaml
+          sed -i "s|myacr.azurecr.io/carbon-frontend:latest|$IMAGE_ID_FRONTEND|g" k8s/frontend.yaml
+
       - name: Run Ansible Playbook
         run: |
           sudo apt-get update && sudo apt-get install -y ansible
           ansible-galaxy collection install kubernetes.core
           ansible-playbook -i ansible/inventory ansible/deploy.yaml
-      - name: Verify Deployment
+
+      - name: Verify Deployment Success
         run: |
           kubectl get pods -n default
-          kubectl get svc -n default
+          kubectl get services -n default
